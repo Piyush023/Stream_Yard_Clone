@@ -1,58 +1,111 @@
 'use client';
-import React, { createRef, useCallback, useEffect, useState } from 'react';
-// import io from 'socket.io';
-import io from 'socket.io-client';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { io, Socket } from 'socket.io-client';
 
 const Home = () => {
   const [camFeed, setCamFeed] = useState<MediaStream | null>(null);
-  const [startFeed, setStartFeed] = useState<boolean>(false);
-  const myVideo = createRef<HTMLVideoElement>();
-  // const socket = io(process.env.REACT_APP_SOCKET_IO_URL || 'http://localhost:3000');
-  const socket = io('http://localhost:3000');
-  socket.on('connect', () => {
-    console.log('Connected to server');
-  });
+  const [isStreaming, setIsStreaming] = useState<boolean>(false);
+  const myVideo = useRef<HTMLVideoElement>(null);
+  const socketRef = useRef<Socket | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
 
-  // When ever we install or create the socket IO instance we have a specific Socket IO Path - '/socket.io/socket.io.js'
-
-  const startFeedService = useCallback(
-    (camStream: MediaStream) => {
-      const mediaRecorder = new MediaRecorder(camStream, {
-        audioBitsPerSecond: 128000,
-        videoBitsPerSecond: 250000,
-      });
-      console.log(startFeed, 'mediaRecorder.pause();');
-
-      if (startFeed) {
-        mediaRecorder.ondataavailable = (ev) => {
-          console.log('Media Data Available', ev.data);
-          socket.emit('binaryStream', ev.data);
-        };
-        mediaRecorder.start(25);
-      } else {
-        console.log('stop');
-        mediaRecorder.stop();
-        socket.close();
-      }
-    },
-    [startFeed, socket],
-  );
-
+  // Initialize socket connection once
   useEffect(() => {
-    const camData = async () => {
+    const socket = io('http://localhost:3000');
+
+    socket.on('connect', () => {
+      console.log('Connected to server');
+    });
+
+    socket.on('disconnect', () => {
+      console.log('Disconnected from server');
+    });
+
+    socket.on('connect_error', (error) => {
+      console.error('Connection error:', error);
+    });
+
+    socketRef.current = socket;
+
+    return () => {
+      socket.disconnect();
+    };
+  }, []);
+
+  // Initialize camera feed
+  useEffect(() => {
+    const initCamera = async () => {
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: true,
+          video: true,
+        });
         setCamFeed(stream);
         if (myVideo.current) {
           myVideo.current.srcObject = stream;
         }
       } catch (error) {
-        console.error('Error accessing media devices.', error);
+        console.error('Error accessing media devices:', error);
       }
     };
 
-    camData();
-    //eslint-disable-next-line react-hooks/exhaustive-deps
+    initCamera();
+
+    // Cleanup camera on unmount
+    return () => {
+      if (camFeed) {
+        camFeed.getTracks().forEach((track) => track.stop());
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const startStreaming = useCallback(() => {
+    if (!camFeed || !socketRef.current) {
+      console.error('Camera feed or socket not ready');
+      return;
+    }
+
+    const mediaRecorder = new MediaRecorder(camFeed, {
+      audioBitsPerSecond: 128000,
+      videoBitsPerSecond: 250000,
+    });
+
+    mediaRecorder.ondataavailable = (ev) => {
+      if (ev.data.size > 0 && socketRef.current?.connected) {
+        console.log('Sending media data:', ev.data.size, 'bytes');
+        socketRef.current.emit('binaryStream', ev.data);
+      }
+    };
+
+    mediaRecorder.onerror = (event) => {
+      console.error('MediaRecorder error:', event);
+    };
+
+    mediaRecorder.onstop = () => {
+      console.log('MediaRecorder stopped');
+    };
+
+    mediaRecorder.start(25); // Send data every 25ms
+    mediaRecorderRef.current = mediaRecorder;
+    setIsStreaming(true);
+    console.log('Streaming started');
+  }, [camFeed]);
+
+  const stopStreaming = useCallback(() => {
+    // Stop the media recorder
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      mediaRecorderRef.current.stop();
+      mediaRecorderRef.current = null;
+    }
+
+    // Notify server to stop streaming
+    if (socketRef.current?.connected) {
+      socketRef.current.emit('stopStream');
+    }
+
+    setIsStreaming(false);
+    console.log('Streaming stopped');
   }, []);
 
   return (
@@ -65,22 +118,14 @@ const Home = () => {
         id="user-media"
         muted
       />
-      <button
-        onClick={() => {
-          setStartFeed(true);
-          startFeedService(camFeed!);
-        }}
-      >
-        Start
-      </button>
-      <button
-        onClick={() => {
-          setStartFeed(false);
-          startFeedService(camFeed!);
-        }}
-      >
-        End
-      </button>
+      <div style={{ marginTop: '10px' }}>
+        <button onClick={startStreaming} disabled={isStreaming || !camFeed}>
+          Start
+        </button>
+        <button onClick={stopStreaming} disabled={!isStreaming} style={{ marginLeft: '10px' }}>
+          End
+        </button>
+      </div>
     </div>
   );
 };
